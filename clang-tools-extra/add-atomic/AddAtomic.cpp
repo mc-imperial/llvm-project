@@ -151,6 +151,13 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
     return true;
   }
 
+  bool TraverseConditionalOperator(ConditionalOperator* CO) {
+    RecursiveASTVisitor<AddAtomicVisitor>::TraverseConditionalOperator(CO);
+    handlePassUp(CO, CO->getTrueExpr());
+    handlePassUp(CO, CO->getFalseExpr());
+    return true;
+  }
+
   bool TraverseUnaryOperator(UnaryOperator* UO) {
     RecursiveASTVisitor<AddAtomicVisitor>::TraverseUnaryOperator(UO);
     auto* SubExpr = UO->getSubExpr();
