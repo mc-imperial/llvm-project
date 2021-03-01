@@ -158,6 +158,14 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
     return true;
   }
 
+  bool TraverseArraySubscriptExpr(ArraySubscriptExpr* ASE) {
+    RecursiveASTVisitor<AddAtomicVisitor>::TraverseArraySubscriptExpr(ASE);
+    for (auto& DDWithIndirection : EquivalentTypesInternal.at(ASE->getBase())) {
+      EquivalentTypesInternal.at(ASE).insert({DDWithIndirection.first, DDWithIndirection.second + 1});
+    }
+    return true;
+  }
+
   bool TraverseUnaryOperator(UnaryOperator* UO) {
     RecursiveASTVisitor<AddAtomicVisitor>::TraverseUnaryOperator(UO);
     auto* SubExpr = UO->getSubExpr();
@@ -210,13 +218,20 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
 
    void handleAssignment(const DeclWithIndirection& DDWithIndirection, const Expr& E) {
      if (auto* ILE = dyn_cast<InitListExpr>(&E)) {
-       assert(DDWithIndirection.second == 0 && "Initializer list only makes sense at struct or array declaration.");
-       if (auto* RT = DDWithIndirection.first->getType()->getAs<RecordType>()) {
+       QualType QT = DDWithIndirection.first->getType();
+       if (auto* RT = QT->getAs<RecordType>()) {
          auto FieldIterator = RT->getDecl()->field_begin();
          for (uint32_t I = 0; I < ILE->getNumInits(); I++) {
            handleAssignment({*FieldIterator, 0}, *ILE->getInit(I));
            ++FieldIterator;
          }
+       } else if (QT->isArrayType()) {
+         for (uint32_t I = 0; I < ILE->getNumInits(); I++) {
+           handleAssignment({DDWithIndirection.first, DDWithIndirection.second + 1}, *ILE->getInit(I));
+         }
+       } else {
+         errs() << "Unexpected initializer list\n";
+         exit(1);
        }
      } else {
        for (auto& OtherDDWithIndirection : EquivalentTypesInternal.at(&E)) {
@@ -390,6 +405,10 @@ class AddAtomicASTConsumer : public ASTConsumer {
      }
      if (TL.getTypeLocClass() == TypeLoc::Pointer) {
        rewriteType(TL.castAs<PointerTypeLoc>().getPointeeLoc(), IndirectionLevel - 1);
+       return;
+     }
+     if (TL.getTypeLocClass() == TypeLoc::ConstantArray) {
+       rewriteType(TL.castAs<ConstantArrayTypeLoc>().getElementLoc(), IndirectionLevel - 1);
        return;
      }
      errs() << "Unhandled type loc " << TL.getTypeLocClass() << "\n";
