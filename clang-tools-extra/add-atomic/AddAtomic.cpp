@@ -355,27 +355,24 @@ class AddAtomicASTConsumer : public ASTConsumer {
  private:
 
    void rewriteType(const TypeLoc& TL, size_t IndirectionLevel) {
+     if (TL.getTypeLocClass() == TypeLoc::FunctionProto) {
+       rewriteType(TL.castAs<FunctionProtoTypeLoc>().getReturnLoc(), IndirectionLevel);
+       return;
+     }
+     if (TL.getTypeLocClass() == TypeLoc::FunctionNoProto) {
+       rewriteType(TL.castAs<FunctionNoProtoTypeLoc>().getReturnLoc(), IndirectionLevel);
+       return;
+     }
      if (IndirectionLevel == 0) {
        TheRewriter.InsertTextAfterToken(TL.getEndLoc(), " _Atomic ");
        return;
      }
-     switch(TL.getTypeLocClass()) {
-     case clang::TypeLoc::Pointer: {
+     if (TL.getTypeLocClass() == TypeLoc::Pointer) {
        rewriteType(TL.castAs<PointerTypeLoc>().getPointeeLoc(), IndirectionLevel - 1);
-       break;
+       return;
      }
-     case clang::TypeLoc::FunctionProto: {
-       rewriteType(TL.castAs<FunctionProtoTypeLoc>().getReturnLoc(), IndirectionLevel);
-       break;
-     }
-     case clang::TypeLoc::FunctionNoProto: {
-       rewriteType(TL.castAs<FunctionNoProtoTypeLoc>().getReturnLoc(), IndirectionLevel);
-       break;
-     }
-     default:
-       errs() << "Unhandled type loc " << TL.getTypeLocClass() << "\n";
-       break;
-     }
+     errs() << "Unhandled type loc " << TL.getTypeLocClass() << "\n";
+     exit(1);
    }
 
    CompilerInstance *CI;
