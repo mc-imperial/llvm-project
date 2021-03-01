@@ -240,7 +240,7 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
 
 class AddAtomicASTConsumer : public ASTConsumer {
  public:
-  explicit AddAtomicASTConsumer(CompilerInstance *CI, std::mt19937 *MT, const std::string& OutputFile) : CI(CI), MT(MT), OutputFile(OutputFile), Visitor(std::make_unique<AddAtomicVisitor>(CI)) {}
+  explicit AddAtomicASTConsumer(CompilerInstance *CI, std::mt19937 *MT, const std::string& NameToUpgrade, const std::string& OutputFile) : CI(CI), MT(MT), NameToUpgrade(NameToUpgrade), OutputFile(OutputFile), Visitor(std::make_unique<AddAtomicVisitor>(CI)) {}
 
   void showDeclWithIndirection(const AddAtomicVisitor::DeclWithIndirection& DDWI) {
     if (DDWI.second == -1) {
@@ -275,12 +275,27 @@ class AddAtomicASTConsumer : public ASTConsumer {
     }
 
     DeclaratorDecl* InitialUpgrade = nullptr;
-    while(true) {
-      int Index = std::uniform_int_distribution<size_t>(0, Visitor->getDecls().size() - 1)(*MT);
-      auto* DD = Visitor->getDecls()[Index];
-      if (CI->getSourceManager().getFileID(DD->getBeginLoc()) == CI->getSourceManager().getMainFileID()) {
-        InitialUpgrade = DD;
-        break;
+    if (NameToUpgrade.empty()) {
+      while (true) {
+        int Index = std::uniform_int_distribution<size_t>(
+            0, Visitor->getDecls().size() - 1)(*MT);
+        auto *DD = Visitor->getDecls()[Index];
+        if (CI->getSourceManager().getFileID(DD->getBeginLoc()) ==
+            CI->getSourceManager().getMainFileID()) {
+          InitialUpgrade = DD;
+          break;
+        }
+      }
+    } else {
+      for (auto* DD : Visitor->getDecls()) {
+        if (DD->getNameAsString() == NameToUpgrade) {
+          InitialUpgrade = DD;
+          break;
+        }
+      }
+      if (InitialUpgrade == nullptr) {
+        errs() << "Did not find a declarator declaration named " << NameToUpgrade << "\n";
+        exit(1);
       }
     }
 
@@ -346,6 +361,10 @@ class AddAtomicASTConsumer : public ASTConsumer {
        rewriteType(TL.castAs<FunctionProtoTypeLoc>().getReturnLoc(), IndirectionLevel);
        break;
      }
+     case clang::TypeLoc::FunctionNoProto: {
+       rewriteType(TL.castAs<FunctionNoProtoTypeLoc>().getReturnLoc(), IndirectionLevel);
+       break;
+     }
      default:
        errs() << "Unhandled type loc " << TL.getTypeLocClass() << "\n";
        break;
@@ -354,6 +373,7 @@ class AddAtomicASTConsumer : public ASTConsumer {
 
    CompilerInstance *CI;
    std::mt19937 *MT;
+  const std::string& NameToUpgrade;
    const std::string& OutputFile;
    std::unique_ptr<AddAtomicVisitor> Visitor;
    Rewriter TheRewriter;
@@ -361,33 +381,35 @@ class AddAtomicASTConsumer : public ASTConsumer {
 
 class AddAtomicFrontendAction : public ASTFrontendAction {
  public:
-   explicit AddAtomicFrontendAction(std::mt19937 *MT, const std::string& OutputFile) : MT(MT), OutputFile(OutputFile) { }
+   explicit AddAtomicFrontendAction(std::mt19937 *MT, const std::string& NameToUpgrade, const std::string& OutputFile) : MT(MT), NameToUpgrade(NameToUpgrade), OutputFile(OutputFile) { }
 
   std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(CompilerInstance &CI, StringRef file) override {
-    return std::make_unique<AddAtomicASTConsumer>(&CI, MT, OutputFile);
+    return std::make_unique<AddAtomicASTConsumer>(&CI, MT, NameToUpgrade, OutputFile);
   }
 
 private:
   std::mt19937 *MT;
+  const std::string& NameToUpgrade;
   const std::string& OutputFile;
 };
 
-std::unique_ptr<FrontendActionFactory> newAddAtomicFrontendActionFactory(std::mt19937 * MT, const std::string& OutputFilename) {
+std::unique_ptr<FrontendActionFactory> newAddAtomicFrontendActionFactory(std::mt19937 * MT, const std::string& NameToUpgrade, const std::string& OutputFilename) {
   class AddAtomicFrontendActionFactory : public FrontendActionFactory {
   public:
-    explicit AddAtomicFrontendActionFactory(std::mt19937 *MT, const std::string& OutputFilename) : MT(MT), OutputFilename(OutputFilename) {}
+    explicit AddAtomicFrontendActionFactory(std::mt19937 *MT, const std::string& NameToUpgrade, const std::string& OutputFilename) : MT(MT), NameToUpgrade(NameToUpgrade), OutputFilename(OutputFilename) {}
 
     std::unique_ptr<FrontendAction> create() override {
-      return std::make_unique<AddAtomicFrontendAction>(MT, OutputFilename);
+      return std::make_unique<AddAtomicFrontendAction>(MT, NameToUpgrade, OutputFilename);
     }
 
   private:
     std::mt19937 * MT;
+    const std::string& NameToUpgrade;
     const std::string& OutputFilename;
   };
 
   return std::make_unique<AddAtomicFrontendActionFactory>(
-      MT, OutputFilename);
+      MT, NameToUpgrade, OutputFilename);
 }
 
 } // end anonymous namespace
@@ -397,6 +419,7 @@ static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 static cl::OptionCategory AddAtomicCategory("add-atomic options");
 static cl::opt<std::string> OutputFilename("o", cl::desc("Specify output filename"), cl::value_desc("filename"));
 static cl::opt<std::string> Seed("seed", cl::desc("Specify seed for random number generation"), cl::value_desc("seed"));
+static cl::opt<std::string> Name("name", cl::desc("Specify name of declaration to upgrade"), cl::value_desc("name"));
 
 
 int main(int argc, const char **argv) {
@@ -417,9 +440,11 @@ int main(int argc, const char **argv) {
 
   int64_t SeedValue = Seed.empty() ? static_cast<int64_t>(std::random_device()()) : std::atoll(Seed.c_str());
 
+  std::string NameValue = Name.empty() ? "" : Name.getValue();
+
   std::mt19937 MT(SeedValue);
 
-  std::unique_ptr<FrontendActionFactory> Factory = newAddAtomicFrontendActionFactory(&MT, OutputFilename.c_str());
+  std::unique_ptr<FrontendActionFactory> Factory = newAddAtomicFrontendActionFactory(&MT, Name, OutputFilename.getValue());
 
   int Result = Tool.run(Factory.get());
 
