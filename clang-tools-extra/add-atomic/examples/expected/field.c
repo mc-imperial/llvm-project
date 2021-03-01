@@ -5,4 +5,5 @@ struct S {
 void foo() {
   struct S myS;
   int _Atomic * foo = &myS.target;
+  (void)foo;
 }

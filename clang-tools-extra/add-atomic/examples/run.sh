@@ -12,7 +12,8 @@ do
     echo "  add-atomic succeded"
     diff temp/upgraded.c expected/$f
     echo "  results match"
-    clang-11 -c expected/$f -Werror=pointer-type-mismatch -Werror=incompatible-pointer-types -o temp/$f.o
+    clang-11 -c temp/upgraded.c -Wall -Werror -o temp/upgraded.o
 done
 
+echo "SUCCESS!"
 rm -rf temp

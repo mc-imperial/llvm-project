@@ -100,7 +100,7 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
   bool TraverseVarDecl(VarDecl *VD) {
     RecursiveASTVisitor<AddAtomicVisitor>::TraverseVarDecl(VD);
     if (VD->hasInit()) {
-      handleAssignment({VD, 0}, VD->getInit());
+      handleAssignment({VD, 0}, *VD->getInit());
     }
     return true;
   }
@@ -126,7 +126,7 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
     if (auto* FD = CE->getDirectCallee()) {
       EquivalentTypesInternal.at(CE).insert({FD, 0});
       for (size_t I = 0; I < FD->getNumParams(); I++) {
-        handleAssignment({FD->getParamDecl(I), 0}, CE->getArg(I));
+        handleAssignment({FD->getParamDecl(I), 0}, *CE->getArg(I));
       }
     }
     return true;
@@ -135,7 +135,7 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
   bool TraverseReturnStmt(ReturnStmt* RS) {
     RecursiveASTVisitor<AddAtomicVisitor>::TraverseReturnStmt(RS);
     assert(EnclosingFunction != nullptr);
-    handleAssignment({EnclosingFunction, 0}, RS->getRetValue());
+    handleAssignment({EnclosingFunction, 0}, *RS->getRetValue());
     return true;
   }
 
@@ -183,10 +183,16 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
   bool TraverseBinaryOperator(BinaryOperator *BO) {
     RecursiveASTVisitor<AddAtomicVisitor>::TraverseBinaryOperator(BO);
     switch(BO->getOpcode()) {
+    case clang::BO_EQ:
+    case clang::BO_GE:
+    case clang::BO_GT:
+    case clang::BO_LE:
+    case clang::BO_LT: {
+      makeEquivalent(*BO->getLHS(), *BO->getRHS());
+      break;
+    }
     case clang::BO_Assign: {
-      for (auto& DDWithIndirection : EquivalentTypesInternal.at(BO->getLHS())) {
-        handleAssignment(DDWithIndirection, BO->getRHS());
-      }
+      makeEquivalent(*BO->getLHS(), *BO->getRHS());
       handlePassUp(BO, BO->getLHS());
       break;
     }
@@ -202,13 +208,12 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
      EquivalentTypesInternal.at(E).insert(EquivalentTypesInternal.at(SubExpr).begin(), EquivalentTypesInternal.at(SubExpr).end());
    }
 
-   void handleAssignment(const DeclWithIndirection& DDWithIndirection, Expr* E) {
-     if (dyn_cast<InitListExpr>(E)) {
+   void handleAssignment(const DeclWithIndirection& DDWithIndirection, const Expr& E) {
+     if (dyn_cast<InitListExpr>(&E)) {
        errs() << "TODO: init lists not yet supported.";
        return;
      }
-
-     for (auto& OtherDDWithIndirection : EquivalentTypesInternal.at(E)) {
+     for (auto& OtherDDWithIndirection : EquivalentTypesInternal.at(&E)) {
        addEquivalenceOneWay(DDWithIndirection, OtherDDWithIndirection);
        addEquivalenceOneWay(OtherDDWithIndirection, DDWithIndirection);
      }
@@ -219,6 +224,15 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
        EquivalentTypes.at(DWI1.first).insert({DWI1.second, {}});
      }
      EquivalentTypes.at(DWI1.first).at(DWI1.second).insert(DWI2);
+   }
+
+   void makeEquivalent(const Expr& E1, const Expr& E2) {
+     for (auto& DDWI1 : EquivalentTypesInternal.at(&E1)) {
+       for (auto& DDWI2 : EquivalentTypesInternal.at(&E2)) {
+         addEquivalenceOneWay(DDWI1, DDWI2);
+         addEquivalenceOneWay(DDWI2, DDWI1);
+       }
+     }
    }
 
   ASTContext* AstContext;
@@ -235,7 +249,7 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
   // Used so that we do not add to |Decls| a declaration we already processed.
   std::unordered_set<DeclaratorDecl*> ObservedDecls;
 
-  std::unordered_map<Expr*, std::set<DeclWithIndirection>> EquivalentTypesInternal;
+  std::unordered_map<const Expr*, std::set<DeclWithIndirection>> EquivalentTypesInternal;
 
   // Tracks the function currently being traversed, if any, so that when we
   // process a 'return' statement we know which function it relates to.

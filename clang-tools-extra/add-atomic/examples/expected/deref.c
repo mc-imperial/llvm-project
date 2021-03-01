@@ -7,4 +7,7 @@ void foo() {
   float * q = *p;
   float * _Atomic ** r = &p;
   float * _Atomic * s = *r;
+  (void)q;
+  (void)s;
+  (void)t;
 }

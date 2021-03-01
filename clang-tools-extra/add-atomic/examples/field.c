@@ -5,4 +5,5 @@ struct S {
 void foo() {
   struct S myS;
   int* foo = &myS.target;
+  (void)foo;
 }
