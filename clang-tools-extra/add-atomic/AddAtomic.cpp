@@ -209,13 +209,20 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
    }
 
    void handleAssignment(const DeclWithIndirection& DDWithIndirection, const Expr& E) {
-     if (dyn_cast<InitListExpr>(&E)) {
-       errs() << "TODO: init lists not yet supported.";
-       return;
-     }
-     for (auto& OtherDDWithIndirection : EquivalentTypesInternal.at(&E)) {
-       addEquivalenceOneWay(DDWithIndirection, OtherDDWithIndirection);
-       addEquivalenceOneWay(OtherDDWithIndirection, DDWithIndirection);
+     if (auto* ILE = dyn_cast<InitListExpr>(&E)) {
+       assert(DDWithIndirection.second == 0 && "Initializer list only makes sense at struct or array declaration.");
+       if (auto* RT = DDWithIndirection.first->getType()->getAs<RecordType>()) {
+         auto FieldIterator = RT->getDecl()->field_begin();
+         for (uint32_t I = 0; I < ILE->getNumInits(); I++) {
+           handleAssignment({*FieldIterator, 0}, *ILE->getInit(I));
+           ++FieldIterator;
+         }
+       }
+     } else {
+       for (auto& OtherDDWithIndirection : EquivalentTypesInternal.at(&E)) {
+         addEquivalenceOneWay(DDWithIndirection, OtherDDWithIndirection);
+         addEquivalenceOneWay(OtherDDWithIndirection, DDWithIndirection);
+       }
      }
    }
 
