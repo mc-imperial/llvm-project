@@ -60,25 +60,48 @@ namespace {
 
 class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
  public:
-  using DeclWithIndirection = std::pair<DeclaratorDecl*, int>;
+  using DeclWithIndirection = std::pair<const DeclaratorDecl*, int>;
 
   explicit AddAtomicVisitor(CompilerInstance *CI) : AstContext(&(CI->getASTContext())) { }
 
-  const std::vector<DeclaratorDecl*>& getDecls() const {
+  const std::vector<const DeclaratorDecl*>& getDecls() const {
     return Decls;
   }
 
-  const std::unordered_map<DeclaratorDecl*,
+  const std::map<std::string, std::vector<FunctionDecl*>>& getFunctionPrototypes() const {
+    return FunctionPrototypes;
+  }
+
+  const std::unordered_map<const DeclaratorDecl*,
                  std::unordered_map<int, std::set<DeclWithIndirection>>>& getEquivalentTypes() const {
     return EquivalentTypes;
   }
 
   bool VisitDeclaratorDecl(DeclaratorDecl *DD) {
-    assert(ObservedDecls.count(DD) == 0);
+    if (ObservedDecls.count(DD) != 0) {
+      assert(EquivalentTypes.count(DD) != 0);
+      assert(dyn_cast<FunctionDecl>(DD));
+      return true;
+    }
     assert(EquivalentTypes.count(DD) == 0);
-    ObservedDecls.insert(DD);
-    EquivalentTypes.insert({DD, {}});
-    Decls.push_back(DD);
+    const DeclaratorDecl* CanonicalDD = DD;
+    if (auto* FD = dyn_cast<FunctionDecl>(DD)) {
+      const FunctionDecl* Definition = nullptr;
+      if (FD->hasBody(Definition)) {
+        CanonicalDD = Definition;
+      }
+      if (FD != Definition) {
+        if (FunctionPrototypes.count(FD->getNameAsString()) == 0) {
+          FunctionPrototypes.insert({FD->getNameAsString(), std::vector<FunctionDecl*>()});
+        }
+        FunctionPrototypes.at(FD->getNameAsString()).push_back(FD);
+      }
+    }
+    if (ObservedDecls.count(CanonicalDD) == 0) {
+      ObservedDecls.insert(CanonicalDD);
+      EquivalentTypes.insert({CanonicalDD, {}});
+      Decls.push_back(CanonicalDD);
+    }
     return true;
   }
 
@@ -123,7 +146,8 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
 
   bool TraverseCallExpr(CallExpr* CE) {
     RecursiveASTVisitor<AddAtomicVisitor>::TraverseCallExpr(CE);
-    if (auto* FD = CE->getDirectCallee()) {
+    if (auto* DirectCallee = CE->getDirectCallee()) {
+      FunctionDecl* FD = DirectCallee->isDefined() ? DirectCallee->getDefinition() : DirectCallee;
       EquivalentTypesInternal.at(CE).insert({FD, 0});
       for (size_t I = 0; I < FD->getNumParams(); I++) {
         handleAssignment({FD->getParamDecl(I), 0}, *CE->getArg(I));
@@ -260,16 +284,19 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
   ASTContext* AstContext;
 
   // The declarations we have processed, in the order in which we found them.
-  std::vector<DeclaratorDecl*> Decls;
+  std::vector<const DeclaratorDecl*> Decls;
 
-  std::unordered_map<DeclaratorDecl*,
+  std::unordered_map<const DeclaratorDecl*,
                                std::unordered_map<int, std::set<DeclWithIndirection>>> EquivalentTypes;
+
+  // Prototypes (without bodies) of all functions.
+  std::map<std::string, std::vector<FunctionDecl*>> FunctionPrototypes;
 
   // Intermediate variables for bottom-up processing:
 
   // The declarations we have seen in a form that can be efficiently queried.
   // Used so that we do not add to |Decls| a declaration we already processed.
-  std::unordered_set<DeclaratorDecl*> ObservedDecls;
+  std::unordered_set<const DeclaratorDecl*> ObservedDecls;
 
   std::unordered_map<const Expr*, std::set<DeclWithIndirection>> EquivalentTypesInternal;
 
@@ -317,12 +344,17 @@ class AddAtomicASTConsumer : public ASTConsumer {
       }
     }
 
-    DeclaratorDecl* InitialUpgrade = nullptr;
+    const DeclaratorDecl* InitialUpgrade = nullptr;
     if (NameToUpgrade.empty()) {
       while (true) {
         int Index = std::uniform_int_distribution<size_t>(
             0, Visitor->getDecls().size() - 1)(*MT);
         auto *DD = Visitor->getDecls()[Index];
+        if (DD->getType()->isArrayType()) {
+          // If we have a declaration like "int A[5] = ..." then 'A' will have
+          // array type and we cannot make the array declaration atomic.
+          continue;
+        }
         if (CI->getSourceManager().getFileID(DD->getBeginLoc()) ==
             CI->getSourceManager().getMainFileID()) {
           InitialUpgrade = DD;
@@ -342,13 +374,13 @@ class AddAtomicASTConsumer : public ASTConsumer {
       }
     }
 
-    std::unordered_map<DeclaratorDecl*, size_t> Upgrades;
+    std::unordered_map<const DeclaratorDecl*, size_t> Upgrades;
     errs() << "Initially upgrading " << InitialUpgrade->getDeclName() << "\n";
     Upgrades.insert({InitialUpgrade, 0});
-    std::deque<std::pair<DeclaratorDecl*, size_t>> UpgradesToPropagate;
+    std::deque<std::pair<const DeclaratorDecl*, size_t>> UpgradesToPropagate;
     UpgradesToPropagate.push_back({InitialUpgrade, 0});
     while (!UpgradesToPropagate.empty()) {
-      std::pair<DeclaratorDecl*, size_t> Current = UpgradesToPropagate.front();
+      std::pair<const DeclaratorDecl*, size_t> Current = UpgradesToPropagate.front();
       UpgradesToPropagate.pop_front();
       errs() << "Propagating upgrade " << Current.first->getDeclName() << " " << Current.second << "\n";
       for (auto& Entry : Visitor->getEquivalentTypes().at(Current.first)) {
@@ -377,6 +409,18 @@ class AddAtomicASTConsumer : public ASTConsumer {
     TheRewriter.setSourceMgr(CI->getSourceManager(), CI->getLangOpts());
     for (auto& Entry : Upgrades) {
       rewriteType(Entry.first->getTypeSourceInfo()->getTypeLoc(), Entry.second);
+      if (auto* FD = dyn_cast<FunctionDecl>(Entry.first)) {
+        if (Visitor->getFunctionPrototypes().count(FD->getNameAsString())) {
+          for (auto &Prototype :
+               Visitor->getFunctionPrototypes().at(FD->getNameAsString())) {
+            if (FD != Prototype) {
+              // Upgrade the prototype to stay in sync with the definition.
+              rewriteType(Prototype->getTypeSourceInfo()->getTypeLoc(),
+                          Entry.second);
+            }
+          }
+        }
+      }
     }
 
     const RewriteBuffer *RewriteBuf =
@@ -391,6 +435,10 @@ class AddAtomicASTConsumer : public ASTConsumer {
  private:
 
    void rewriteType(const TypeLoc& TL, size_t IndirectionLevel) {
+     if (TL.getTypeLocClass() == TypeLoc::Qualified) {
+       rewriteType(TL.castAs<QualifiedTypeLoc>().getUnqualifiedLoc(), IndirectionLevel);
+       return;
+     }
      if (TL.getTypeLocClass() == TypeLoc::FunctionProto) {
        rewriteType(TL.castAs<FunctionProtoTypeLoc>().getReturnLoc(), IndirectionLevel);
        return;
