@@ -68,8 +68,12 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
     return Decls;
   }
 
-  const std::map<std::string, std::vector<FunctionDecl*>>& getFunctionPrototypes() const {
+  const std::map<std::string, std::vector<const FunctionDecl*>>& getFunctionPrototypes() const {
     return FunctionPrototypes;
+  }
+
+  const std::map<const ParmVarDecl*, std::vector<const ParmVarDecl*>>& getParameterToPrototypeParameters() const {
+    return ParameterToPrototypeParameters;
   }
 
   const std::unordered_map<const DeclaratorDecl*,
@@ -80,7 +84,7 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
   bool VisitDeclaratorDecl(DeclaratorDecl *DD) {
     if (ObservedDecls.count(DD) != 0) {
       assert(EquivalentTypes.count(DD) != 0);
-      assert(dyn_cast<FunctionDecl>(DD));
+      assert(dyn_cast<FunctionDecl>(DD) || dyn_cast<ParmVarDecl>(DD));
       return true;
     }
     assert(EquivalentTypes.count(DD) == 0);
@@ -92,9 +96,28 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
       }
       if (FD != Definition) {
         if (FunctionPrototypes.count(FD->getNameAsString()) == 0) {
-          FunctionPrototypes.insert({FD->getNameAsString(), std::vector<FunctionDecl*>()});
+          FunctionPrototypes.insert({FD->getNameAsString(), std::vector<const FunctionDecl*>()});
         }
         FunctionPrototypes.at(FD->getNameAsString()).push_back(FD);
+        if (Definition != nullptr) {
+          for (uint32_t I = 0; I < FD->getNumParams(); I++) {
+            if (ParameterToPrototypeParameters.count(
+                    Definition->getParamDecl(I)) == 0) {
+              ParameterToPrototypeParameters.insert(
+                  {Definition->getParamDecl(I),
+                   std::vector<const ParmVarDecl *>()});
+            }
+            ParameterToPrototypeParameters.at(Definition->getParamDecl(I))
+                .push_back(FD->getParamDecl(I));
+            PrototypeParameterToCanonicalParameter.insert(
+                {FD->getParamDecl(I), Definition->getParamDecl(I)});
+          }
+        }
+      }
+    }
+    if (auto* PVD = dyn_cast<ParmVarDecl>(DD)) {
+      if (PrototypeParameterToCanonicalParameter.count(PVD) != 0) {
+        CanonicalDD = PrototypeParameterToCanonicalParameter.at(PVD);
       }
     }
     if (ObservedDecls.count(CanonicalDD) == 0) {
@@ -290,7 +313,11 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
                                std::unordered_map<int, std::set<DeclWithIndirection>>> EquivalentTypes;
 
   // Prototypes (without bodies) of all functions.
-  std::map<std::string, std::vector<FunctionDecl*>> FunctionPrototypes;
+  std::map<std::string, std::vector<const FunctionDecl*>> FunctionPrototypes;
+
+  // Mapping from parameters of a function definition to all the corresponding parameters of its prototypes.
+  std::map<const ParmVarDecl*, std::vector<const ParmVarDecl*>> ParameterToPrototypeParameters;
+  std::map<const ParmVarDecl*, const ParmVarDecl*> PrototypeParameterToCanonicalParameter;
 
   // Intermediate variables for bottom-up processing:
 
@@ -418,6 +445,14 @@ class AddAtomicASTConsumer : public ASTConsumer {
               rewriteType(Prototype->getTypeSourceInfo()->getTypeLoc(),
                           Entry.second);
             }
+          }
+        }
+      }
+      if (auto* PVD = dyn_cast<ParmVarDecl>(Entry.first)) {
+        if (Visitor->getParameterToPrototypeParameters().count(PVD)) {
+          for (auto* PrototypeParameter : Visitor->getParameterToPrototypeParameters().at(PVD)) {
+            assert(PVD != PrototypeParameter);
+            rewriteType(PrototypeParameter->getTypeSourceInfo()->getTypeLoc(), Entry.second);
           }
         }
       }
