@@ -377,9 +377,20 @@ class AddAtomicASTConsumer : public ASTConsumer {
         int Index = std::uniform_int_distribution<size_t>(
             0, Visitor->getDecls().size() - 1)(*MT);
         auto *DD = Visitor->getDecls()[Index];
+        if (const auto* FD = dyn_cast<FieldDecl>(DD)) {
+          if (FD->isBitField()) {
+            // We cannot make bitfields atomic.
+            continue;
+          }
+        }
         if (DD->getType()->isArrayType()) {
           // If we have a declaration like "int A[5] = ..." then 'A' will have
           // array type and we cannot make the array declaration atomic.
+          continue;
+        }
+        if (dyn_cast<DecayedType>(DD->getType())) {
+          // Arrays and functions decay to pointers, and we cannot make either
+          // type atomic.
           continue;
         }
         if (CI->getSourceManager().getFileID(DD->getBeginLoc()) ==
@@ -483,6 +494,8 @@ class AddAtomicASTConsumer : public ASTConsumer {
        return;
      }
      if (IndirectionLevel == 0) {
+       assert (TL.getTypeLocClass() != TypeLoc::IncompleteArray);
+       assert (TL.getTypeLocClass() != TypeLoc::ConstantArray);
        TheRewriter.InsertTextAfterToken(TL.getEndLoc(), " _Atomic ");
        return;
      }
