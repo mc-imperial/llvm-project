@@ -251,6 +251,10 @@ class AddAtomicVisitor : public RecursiveASTVisitor<AddAtomicVisitor> {
       handlePassUp(BO, BO->getLHS());
       break;
     }
+    case clang::BO_Comma: {
+      handlePassUp(BO, BO->getRHS());
+      break;
+    }
     default:
       break;
     }
